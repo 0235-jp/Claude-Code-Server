@@ -98,32 +98,43 @@ async function executeClaudeAndStream(prompt, claudeSessionId, options, reply) {
   }
   resetInactivityTimeout()
 
+  let jsonBuffer = ''
+
   claudeProcess.stdout.on('data', async (data) => {
     console.log('Claude stdout:', data.toString())
     resetInactivityTimeout() // Reset inactivity timer since we got output
     
-    const lines = data.toString().split('\n').filter(line => line.trim())
+    const lines = data.toString().split('\n')
 
     for (const line of lines) {
-      try {
-        const json = JSON.parse(line)
-
-        if (json.type === 'system' && json.subtype === 'init' && json.session_id) {
-          if (claudeSessionId) {
-            console.log('Updating session after resume:', claudeSessionId, '->', json.session_id)
-          } else {
-            console.log('Saving new session:', json.session_id, workspacePath)
+      if (line.trim()) {
+        jsonBuffer += line
+        
+        try {
+          const json = JSON.parse(jsonBuffer)
+          
+          // JSONが完璧にパースできたら送信
+          if (json.type === 'system' && json.subtype === 'init' && json.session_id) {
+            if (claudeSessionId) {
+              console.log('Updating session after resume:', claudeSessionId, '->', json.session_id)
+            } else {
+              console.log('Saving new session:', json.session_id, workspacePath)
+            }
+            saveSession(json.session_id, workspacePath)
           }
-          saveSession(json.session_id, workspacePath)
-        }
 
-        reply.raw.write(`data: ${line}\n\n`)
-        reply.raw.flush && reply.raw.flush()
-      } catch (e) {
-        console.log('Non-JSON line:', line)
-        // 非JSONデータもクライアントに送信する（長いツール結果の継続部分など）
-        reply.raw.write(`${line}\n\n`)
-        reply.raw.flush && reply.raw.flush()
+          reply.raw.write(`data: ${JSON.stringify(json)}\n\n`)
+          reply.raw.flush && reply.raw.flush()
+          jsonBuffer = '' // バッファをリセット
+        } catch (e) {
+          // JSONが不完全な場合は蓄積し続ける
+          // バッファが異常に大きくなった場合はリセット（メモリ保護）
+          if (jsonBuffer.length > 100000) {
+            console.log('JSON buffer too large, resetting:', jsonBuffer.substring(0, 200) + '...')
+            jsonBuffer = ''
+          }
+          continue
+        }
       }
     }
   })
