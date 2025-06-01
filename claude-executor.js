@@ -121,6 +121,9 @@ async function executeClaudeAndStream(prompt, claudeSessionId, options, reply) {
         reply.raw.flush && reply.raw.flush()
       } catch (e) {
         console.log('Non-JSON line:', line)
+        // 非JSONデータもクライアントに送信する（長いツール結果の継続部分など）
+        reply.raw.write(`${line}\n\n`)
+        reply.raw.flush && reply.raw.flush()
       }
     }
   })

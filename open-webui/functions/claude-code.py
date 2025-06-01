@@ -41,7 +41,8 @@ class Pipe:
         # Get the latest message
         messages = body.get("messages", [])
         if not messages:
-            return "Error: No messages provided"
+            yield "Error: No messages provided"
+            return
 
         user_message = messages[-1].get("content", "")
 
@@ -54,23 +55,28 @@ class Pipe:
         for i in range(len(messages) - 2, -1, -1):
             if messages[i].get("role") == "assistant":
                 assistant_content = messages[i].get("content", "")
-                session_match = re.search(r'session_id=([a-f0-9-]+)', assistant_content)
-                if session_match:
-                    session_id = session_match.group(1)
                 
-                # Extract previous settings
-                prev_danger_match = re.search(r'dangerously-skip-permissions=(\w+)', assistant_content)
-                if prev_danger_match:
-                    prev_dangerously_skip_permissions = prev_danger_match.group(1).lower() == 'true'
+                # Get most recent session_id first
+                if session_id is None:
+                    session_match = re.search(r'session_id=([a-zA-Z0-9\-]+)', assistant_content)
+                    if session_match:
+                        session_id = session_match.group(1)
                 
-                prev_allowed_match = re.search(r'allowedTools=\[([^\]]+)\]', assistant_content)
-                if prev_allowed_match:
-                    prev_allowedTools = [tool.strip().strip('"\'') for tool in prev_allowed_match.group(1).split(',')]
+                # Extract previous settings (keep collecting from older messages)
+                if prev_dangerously_skip_permissions is None:
+                    prev_danger_match = re.search(r'dangerously-skip-permissions=(\w+)', assistant_content)
+                    if prev_danger_match:
+                        prev_dangerously_skip_permissions = prev_danger_match.group(1).lower() == 'true'
                 
-                prev_disallowed_match = re.search(r'disallowedTools=\[([^\]]+)\]', assistant_content)
-                if prev_disallowed_match:
-                    prev_disallowedTools = [tool.strip().strip('"\'') for tool in prev_disallowed_match.group(1).split(',')]
-                break
+                if prev_allowedTools is None:
+                    prev_allowed_match = re.search(r'allowedTools=\[([^\]]+)\]', assistant_content)
+                    if prev_allowed_match:
+                        prev_allowedTools = [tool.strip().strip('"\'') for tool in prev_allowed_match.group(1).split(',')]
+                
+                if prev_disallowedTools is None:
+                    prev_disallowed_match = re.search(r'disallowedTools=\[([^\]]+)\]', assistant_content)
+                    if prev_disallowed_match:
+                        prev_disallowedTools = [tool.strip().strip('"\'') for tool in prev_disallowed_match.group(1).split(',')]
 
         # Parse current message settings, fall back to previous if not specified
         danger_match = re.search(r'dangerously-skip-permissions=(\w+)', user_message)
@@ -120,16 +126,26 @@ class Pipe:
         )
 
         if response.status_code == 200:
-            buffer = ""
+            json_buffer = ""
             for line in response.iter_lines():
                 if line:
                     try:
                         line_text = line.decode("utf-8")
                         if line_text.startswith("data: "):
                             json_str = line_text.replace("data: ", "")
-                            buffer += json_str
-                            json_data = json.loads(buffer)
-                            buffer = ""  # Reset buffer on successful parse
+                            json_buffer += json_str
+                            
+                            # Try to parse accumulated JSON
+                            try:
+                                json_data = json.loads(json_buffer)
+                                json_buffer = ""  # Reset buffer on successful parse
+                            except json.JSONDecodeError:
+                                # JSON incomplete, continue accumulating
+                                # If buffer gets too large, reset to prevent memory issues
+                                if len(json_buffer) > 50000:  # Increase limit for large tool results
+                                    yield f"\n⚠️ JSON buffer overflow, skipping malformed data\n"
+                                    json_buffer = ""
+                                continue
                                 
                             if json_data.get("type") == "system" and json_data.get("subtype") == "init":
                                 session_id_from_system = json_data.get("session_id")

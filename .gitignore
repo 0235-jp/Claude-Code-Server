@@ -13,3 +13,16 @@ yarn-error.log*
 .env.production.local
 *.log
 server.pid
+
+# Python virtual environments
+open-webui/test/venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
