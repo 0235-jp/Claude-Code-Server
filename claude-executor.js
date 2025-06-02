@@ -123,12 +123,22 @@ async function executeClaudeAndStream(prompt, claudeSessionId, options, reply) {
             saveSession(json.session_id, workspacePath)
           }
 
-          reply.raw.write(`data: ${JSON.stringify(json)}\n\n`)
-          reply.raw.flush && reply.raw.flush()
-          jsonBuffer = '' // バッファをリセット
+          // Split JSON into chunks for streaming
+          const jsonString = JSON.stringify(json)
+          const chunkSize = 100
+          
+          for (let i = 0; i < jsonString.length; i += chunkSize) {
+            const chunk = jsonString.slice(i, i + chunkSize)
+            reply.raw.write(`data: ${chunk}\n\n`)
+            reply.raw.flush && reply.raw.flush()
+            // Small delay between chunks to ensure proper streaming
+            await new Promise(resolve => setTimeout(resolve, 10))
+          }
+          
+          jsonBuffer = '' // Reset buffer
         } catch (e) {
-          // JSONが不完全な場合は蓄積し続ける
-          // バッファが異常に大きくなった場合はリセット（メモリ保護）
+          // Continue accumulating if JSON is incomplete
+          // Reset buffer if it gets too large (memory protection)
           if (jsonBuffer.length > 100000) {
             console.log('JSON buffer too large, resetting:', jsonBuffer.substring(0, 200) + '...')
             jsonBuffer = ''
