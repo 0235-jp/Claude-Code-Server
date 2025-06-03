@@ -76,16 +76,19 @@ async function startServer() {
     // Get the latest user message
     const userMessage = messages[messages.length - 1]?.content || ''
     
-    // Extract session_id from previous assistant messages
+    // Extract session_id and settings from previous assistant messages
     let session_id = null
     let prev_dangerously_skip_permissions = null
     let prev_allowedTools = null
     let prev_disallowedTools = null
     
+    // First try to get session_id from OpenAI response ID (if available in message metadata)
+    // For now, extract from content as fallback
     for (let i = messages.length - 2; i >= 0; i--) {
       if (messages[i].role === 'assistant') {
         const content = messages[i].content || ''
         
+        // Try session_id from content (legacy compatibility)
         const sessionMatch = content.match(/session_id=([a-f0-9-]+)/)
         if (sessionMatch) session_id = sessionMatch[1]
         
@@ -101,7 +104,11 @@ async function startServer() {
         if (disallowedMatch) {
           prev_disallowedTools = disallowedMatch[1].split(',').map(tool => tool.trim().replace(/['"]/g, ''))
         }
-        break
+        
+        // If we found session info, break (use most recent)
+        if (sessionMatch || dangerMatch || allowedMatch || disallowedMatch) {
+          break
+        }
       }
     }
     
@@ -200,8 +207,11 @@ async function startServer() {
             if (sessionId && !sessionPrinted) {
               sessionPrinted = true
               
-              // Build session info content
-              let sessionInfo = `session_id=${sessionId}\n`
+              // Update messageId to use session_id directly
+              messageId = sessionId
+              
+              // Build session info content (without session_id display)
+              let sessionInfo = ''
               if (dangerouslySkipPermissions !== null) {
                 sessionInfo += `dangerously-skip-permissions=${dangerouslySkipPermissions}\n`
               }
@@ -216,7 +226,7 @@ async function startServer() {
               sessionInfo += '<thinking>\n'
               inThinking = true
               
-              // Send initial chunk with role
+              // Send initial chunk with role and session_id in ID
               const roleChunk = {
                 id: messageId,
                 object: 'chat.completion.chunk',
@@ -232,10 +242,12 @@ async function startServer() {
               }
               originalWrite.call(reply.raw, `data: ${JSON.stringify(roleChunk)}\n\n`)
               
-              // Send session info in chunks (only once)
-              const chunks = splitIntoChunks(sessionInfo)
-              for (const chunk of chunks) {
-                sendChunk(chunk)
+              // Send session info in chunks (only once, no session_id display)
+              if (sessionInfo.trim()) {
+                const chunks = splitIntoChunks(sessionInfo)
+                for (const chunk of chunks) {
+                  sendChunk(chunk)
+                }
               }
             }
           } else if (jsonData.type === 'assistant') {
