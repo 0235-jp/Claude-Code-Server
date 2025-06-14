@@ -373,9 +373,11 @@ async function startServer(): Promise<void> {
       const originalEnd = reply.raw.end;
 
       let inThinking = false;
-      let sessionPrinted = false;
+      let sessionInfoSent = false;
+      let hasStartedResponse = false;
       const messageId = 'chatcmpl-' + Date.now();
       const systemFingerprint = 'fp_' + Date.now().toString(36);
+      const processedMessages = new Set<string>();
 
       // Helper function to split text into chunks
       function splitIntoChunks(text: string, chunkSize = 100): string[] {
@@ -384,6 +386,35 @@ async function startServer(): Promise<void> {
           chunks.push(text.slice(i, i + chunkSize));
         }
         return chunks;
+      }
+
+      // Helper function to send session info once
+      function sendSessionInfo(): void {
+        if (sessionInfoSent) return;
+        sessionInfoSent = true;
+
+        let sessionInfo = '';
+        if (session_id) sessionInfo += `session-id=${session_id}\n`;
+        if (workspace) sessionInfo += `workspace=${workspace}\n`;
+        if (dangerouslySkipPermissions !== null) {
+          sessionInfo += `dangerously-skip-permissions=${dangerouslySkipPermissions}\n`;
+        }
+        if (allowedTools && allowedTools.length > 0) {
+          const toolsStr = allowedTools.map(tool => `"${tool}"`).join(',');
+          sessionInfo += `allowed-tools=[${toolsStr}]\n`;
+        }
+        if (disallowedTools && disallowedTools.length > 0) {
+          const toolsStr = disallowedTools.map(tool => `"${tool}"`).join(',');
+          sessionInfo += `disallowed-tools=[${toolsStr}]\n`;
+        }
+        if (mcpAllowedTools && mcpAllowedTools.length > 0) {
+          const toolsStr = mcpAllowedTools.map(tool => `"${tool}"`).join(',');
+          sessionInfo += `mcp-allowed-tools=[${toolsStr}]\n`;
+        }
+
+        if (sessionInfo) {
+          sendChunk(sessionInfo);
+        }
       }
 
       // Helper function to send a chunk
@@ -410,6 +441,26 @@ async function startServer(): Promise<void> {
       }
 
       reply.raw.write = function (chunk: Buffer | string): boolean {
+        // Send initial role chunk only once at the start
+        if (!hasStartedResponse) {
+          hasStartedResponse = true;
+
+          const roleChunk = {
+            id: messageId,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: 'claude-code',
+            system_fingerprint: systemFingerprint,
+            choices: [
+              { index: 0, delta: { role: 'assistant' }, logprobs: null, finish_reason: null },
+            ],
+          };
+          (originalWrite as (chunk: Buffer | string) => boolean).call(
+            reply.raw,
+            `data: ${JSON.stringify(roleChunk)}\n\n`
+          );
+        }
+
         if (chunk.toString().startsWith('data: ')) {
           try {
             const jsonStr = chunk.toString().replace('data: ', '').trim();
@@ -418,60 +469,23 @@ async function startServer(): Promise<void> {
             const buffer = jsonStr;
             const jsonData: StreamJsonData = JSON.parse(buffer);
 
+            // Create unique identifier to prevent duplicates
+            const messageHash = require('crypto').createHash('md5').update(jsonStr).digest('hex');
+            if (processedMessages.has(messageHash)) {
+              return true; // Skip duplicate processing
+            }
+            processedMessages.add(messageHash);
+
             if (jsonData.type === 'system' && jsonData.subtype === 'init') {
-              const sessionId = jsonData.session_id;
-              if (sessionId && !sessionPrinted) {
-                sessionPrinted = true;
+              // Send session info once when we get the init
+              sendSessionInfo();
 
-                // Build session info content
-                let sessionInfo = `session-id=${sessionId}\n`;
-                if (workspace) {
-                  sessionInfo += `workspace=${workspace}\n`;
-                }
-                if (dangerouslySkipPermissions !== null) {
-                  sessionInfo += `dangerously-skip-permissions=${dangerouslySkipPermissions}\n`;
-                }
-                if (allowedTools) {
-                  const toolsStr = allowedTools.map(tool => `"${tool}"`).join(',');
-                  sessionInfo += `allowed-tools=[${toolsStr}]\n`;
-                }
-                if (disallowedTools) {
-                  const toolsStr = disallowedTools.map(tool => `"${tool}"`).join(',');
-                  sessionInfo += `disallowed-tools=[${toolsStr}]\n`;
-                }
-                if (mcpAllowedTools) {
-                  const toolsStr = mcpAllowedTools.map(tool => `"${tool}"`).join(',');
-                  sessionInfo += `mcp-allowed-tools=[${toolsStr}]\n`;
-                }
-                sessionInfo += '<thinking>\n';
-                inThinking = true;
-
-                // Send initial chunk with role
-                const roleChunk = {
-                  id: messageId,
-                  object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000),
-                  model: 'claude-code',
-                  system_fingerprint: systemFingerprint,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: { role: 'assistant' },
-                      logprobs: null,
-                      finish_reason: null,
-                    },
-                  ],
-                };
-                (originalWrite as (chunk: Buffer | string) => boolean).call(
-                  reply.raw,
-                  `data: ${JSON.stringify(roleChunk)}\n\n`
+              // Start thinking block
+              if (!inThinking) {
+                sendChunk(
+                  '\n<details type="reasoning" done="false">\n<summary>Thought process</summary>\n'
                 );
-
-                // Send session info in chunks (only once)
-                const chunks = splitIntoChunks(sessionInfo);
-                for (const chunk of chunks) {
-                  sendChunk(chunk);
-                }
+                inThinking = true;
               }
             } else if (jsonData.type === 'assistant') {
               const message = jsonData.message || {};
@@ -483,7 +497,7 @@ async function startServer(): Promise<void> {
                 if (item.type === 'text') {
                   // Close thinking when text content arrives
                   if (inThinking) {
-                    sendChunk('\n</thinking>\n');
+                    sendChunk('\n</details>\n');
                     inThinking = false;
                   }
 
@@ -497,30 +511,32 @@ async function startServer(): Promise<void> {
                     );
                   }
                 } else if (item.type === 'thinking') {
-                  // Reopen thinking if it was closed by text
+                  // Start thinking block if not already open
                   if (!inThinking) {
-                    sendChunk('\n<thinking>\n');
+                    sendChunk(
+                      '\n<details type="reasoning" done="false">\n<summary>Thinking...</summary>\n'
+                    );
                     inThinking = true;
                   }
 
-                  // Thinking content stays within thinking tags
+                  // Send thinking content without emoji prefix
                   const thinkingContent = item.thinking || '';
-                  const fullText = `\n🤖< ${thinkingContent}`;
-                  const chunks = splitIntoChunks(fullText);
+                  const chunks = splitIntoChunks(thinkingContent);
                   for (const chunk of chunks) {
                     sendChunk(chunk);
                   }
                 } else if (item.type === 'tool_use') {
-                  // Reopen thinking if it was closed by text
+                  // Tool use within thinking block
                   if (!inThinking) {
-                    sendChunk('\n<thinking>\n');
+                    sendChunk(
+                      '\n<details type="reasoning" done="false">\n<summary>Using tools...</summary>\n'
+                    );
                     inThinking = true;
                   }
 
-                  // Tool use stays within thinking tags
                   const toolName = item.name || 'Unknown';
-                  const toolInput = JSON.stringify(item.input || {});
-                  const fullText = `\n🔧 Using ${toolName}: ${toolInput}\n`;
+                  const toolInput = JSON.stringify(item.input || {}, null, 2);
+                  const fullText = `\n> 🔧 Using ${toolName}: ${toolInput}\n`;
                   const chunks = splitIntoChunks(fullText);
                   for (const chunk of chunks) {
                     sendChunk(chunk);
@@ -530,7 +546,7 @@ async function startServer(): Promise<void> {
 
               // Close thinking if still open at end of final response
               if (isFinalResponse && inThinking) {
-                sendChunk('\n</thinking>\n');
+                sendChunk('\n</details>\n');
                 inThinking = false;
               }
 
@@ -562,9 +578,17 @@ async function startServer(): Promise<void> {
 
               for (const item of content) {
                 if (item.type === 'tool_result') {
-                  const toolContent = item.content || '';
+                  let toolContent = item.content || '';
                   const isError = item.is_error || false;
 
+                  // Format tool results better for OpenWebUI
+                  if (
+                    !isError &&
+                    toolContent.includes('Applied') &&
+                    toolContent.includes('edits')
+                  ) {
+                    toolContent = `${toolContent}\n\n(Changes applied to file successfully)`;
+                  }
                   const prefix = isError ? '\n❌ Tool Error: ' : '\n✅ Tool Result: ';
                   const fullText = prefix + toolContent + '\n';
                   const chunks = splitIntoChunks(fullText);
@@ -575,7 +599,7 @@ async function startServer(): Promise<void> {
               }
             } else if (jsonData.type === 'error') {
               if (inThinking) {
-                sendChunk('\n</thinking>\n');
+                sendChunk('\n</details>\n');
               }
 
               const errorMessage =
