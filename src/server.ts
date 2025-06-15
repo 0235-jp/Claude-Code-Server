@@ -268,6 +268,16 @@ async function startServer(): Promise<void> {
       // Get the latest user message
       const userMessage = messages[messages.length - 1]?.content || '';
 
+      // [SESSION_DEBUG] Log full received messages for debugging
+      requestLogger.info(
+        {
+          type: 'message_debug',
+          messages,
+          tag: '[SESSION_DEBUG]',
+        },
+        '[SESSION_DEBUG] Full received messages'
+      );
+
       // Extract session_id and workspace from previous assistant messages
       let session_id: string | null = null;
       let workspace: string | null = null;
@@ -275,13 +285,17 @@ async function startServer(): Promise<void> {
       let prev_allowedTools: string[] | null = null;
       let prev_disallowedTools: string[] | null = null;
       let prev_mcpAllowedTools: string[] | null = null;
+      const foundSessionIds: string[] = [];
 
       for (let i = messages.length - 2; i >= messageStartIndex; i--) {
         if (messages[i].role === 'assistant') {
           const content = messages[i].content || '';
 
           const sessionMatch = content.match(/session-id=([a-f0-9-]+)/);
-          if (sessionMatch) session_id = sessionMatch[1];
+          if (sessionMatch) {
+            foundSessionIds.push(sessionMatch[1]);
+            if (!session_id) session_id = sessionMatch[1];
+          }
 
           const workspaceMatch = content.match(/workspace=([^\s\n]+)/);
           if (workspaceMatch) workspace = workspaceMatch[1];
@@ -313,6 +327,18 @@ async function startServer(): Promise<void> {
           break;
         }
       }
+
+      // [SESSION_DEBUG] Log session-id extraction details
+      requestLogger.info(
+        {
+          type: 'session_debug',
+          foundSessionIds,
+          selectedSessionId: session_id,
+          duplicateCount: foundSessionIds.length,
+          tag: '[SESSION_DEBUG]',
+        },
+        `[SESSION_DEBUG] Session-id extraction: found ${foundSessionIds.length} session-ids, selected: ${session_id}`
+      );
 
       // Parse current message settings
       const currentWorkspaceMatch = userMessage.match(/workspace=([^\s\n]+)/);
@@ -424,6 +450,18 @@ async function startServer(): Promise<void> {
       // Helper function to send a chunk
       function sendChunk(content: string, finishReason: string | null = null): void {
         try {
+          // [SESSION_DEBUG] Log chunk details
+          requestLogger.debug(
+            {
+              type: 'chunk_debug',
+              chunkContent: content,
+              chunkLength: content.length,
+              finishReason,
+              tag: '[SESSION_DEBUG]',
+            },
+            `[SESSION_DEBUG] Sending chunk: ${content.length} chars, finish: ${finishReason}`
+          );
+
           const chunk = {
             id: messageId,
             object: 'chat.completion.chunk',
