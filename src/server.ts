@@ -268,6 +268,10 @@ async function startServer(): Promise<void> {
       // Get the latest user message
       const userMessage = messages[messages.length - 1]?.content || '';
 
+      // Create request-scoped logger for OpenAI API
+      const requestLogger = createRequestLogger('openai-api', request.id);
+      const perfLogger = new PerformanceLogger(requestLogger, 'openai-api-request');
+
       // [SESSION_DEBUG] Log full received messages for debugging
       requestLogger.info(
         {
@@ -379,10 +383,6 @@ async function startServer(): Promise<void> {
           .trim();
         if (!prompt) prompt = userMessage;
       }
-
-      // Create request-scoped logger for OpenAI API
-      const requestLogger = createRequestLogger('openai-api', request.id);
-      const perfLogger = new PerformanceLogger(requestLogger, 'openai-api-request');
 
       // Log incoming request details with structured logging
       requestLogger.info(
