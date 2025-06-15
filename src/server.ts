@@ -527,8 +527,7 @@ async function startServer(): Promise<void> {
                   const toolsStr = mcpAllowedTools.map(tool => `"${tool}"`).join(',');
                   sessionInfo += `mcp-allowed-tools=[${toolsStr}]\n`;
                 }
-                sessionInfo += '<thinking>\n';
-                inThinking = true;
+                sessionInfo += '\n';
 
                 // Send initial chunk with role
                 const roleChunk = {
