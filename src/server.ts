@@ -640,6 +640,17 @@ async function startServer(): Promise<void> {
               for (let i = 0; i < chunks.length; i++) {
                 sendChunk(chunks[i], i === chunks.length - 1 ? 'stop' : null);
               }
+            } else if (jsonData.type === 'result') {
+              // Handle session completion result - no need to send content as it's already been sent
+              requestLogger.debug(
+                {
+                  resultType: jsonData.subtype,
+                  sessionId: jsonData.session_id,
+                  type: 'session_result',
+                },
+                `Session completed with result: ${jsonData.subtype}`
+              );
+              // Don't send the result content again as it was already streamed
             } else {
               // Handle unknown JSON data types
               requestLogger.warn(
